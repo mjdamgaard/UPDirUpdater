@@ -1,5 +1,5 @@
 
-const urlRoot = "https://www.up-web.org";
+const urlRoot = "https://up-web.org";
 
 
 export const ajaxServerDomainURL = urlRoot + ":8080";
