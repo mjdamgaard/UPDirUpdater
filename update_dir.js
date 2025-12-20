@@ -20,8 +20,12 @@ let [ , curPath, dirPath, domain = "localhost"] = process.argv;
 if (!dirPath) throw (
   "Specify dirPath in '$ node <program path> <dirPath>'"
 );
+if (domain !== "localhost" && domain !== "up-web.org") throw (
+  "Unrecognized domain: " + domain
+);
 if (dirPath[0] === ".") {
   dirPath = path.normalize(path.dirname(curPath) + "/" + dirPath);
+  if (dirPath.at(-1) === "/") dirPath = dirPath.slice(0, -1);
 }
 directoryUpdater.setDomain(domain);
 
@@ -48,6 +52,13 @@ async function main() {
   let hasExited = false;
   while(!hasExited) {
     let command = await read({prompt: `dir #${dirID}> `});
+    // TODO: Add an optional path argument (where wildcards can be used) after
+    // the 'u' in this command. And if provided, only upload and delete files
+    // that match that path.
+    // Actually, scratch that. We should instead just create and write to a
+    // '.checksums' file that stores a checksum/hash for each successfully
+    // uploaded file (including table files, why not), and then only re-upload
+    // the given file if the checksum has changed.
     if (/^([uU]|upload)$/.test(command)) {
       console.log("Uploading...");
       try {

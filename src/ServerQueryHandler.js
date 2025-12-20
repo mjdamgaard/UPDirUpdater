@@ -5,6 +5,8 @@ export const curDomain = (typeof window === "undefined") ? "localhost" :
 export const OWN_UP_NODE_ID = "1";
 
 
+// TODO: Add a noCache option, which the users also get to optionally set.
+
 
 
 export class ServerQueryHandler {
@@ -34,6 +36,10 @@ export class ServerQueryHandler {
     if (upNodeID !== OWN_UP_NODE_ID) throw new NetworkError(
       `Unrecognized UP node ID: "${upNodeID}" (queries to routes of foreign ` +
       "UP nodes are not implemented yet)"
+    );
+    if (route.includes("//")) throw new NetworkError(
+      "A route must not contain empty segments (repeated slashes). Received: " +
+      route + "."
     );
 
     // Construct the reqBody.
@@ -100,7 +106,7 @@ export class ServerQueryHandler {
     // Send the request.
     responsePromise = this.#requestHelper(
       serverKey, route, isGET, reqBody, headers
-    );
+    ).then(x => x, e => e);
 
     // Then add it to requestBuffer, and also give it a then-callback to remove
     // itself from said buffer, before return ing the promise.
@@ -196,6 +202,17 @@ export class ServerQueryHandler {
 
 
 
+export class NetworkError {
+  constructor(msg) {
+    this.msg = msg;
+  }
+  toString() {
+    return this.msg; 
+  }
+}
+
+
+
 function unSerialize(val, mimeType) {
   if (mimeType === "text/plain") {
     return val;
@@ -210,18 +227,5 @@ function unSerialize(val, mimeType) {
   else throw (
     `unSerialize(): Unrecognized/un-implemented MIME type: ${mimeType}`
   );
-}
-
-
-
-
-
-export class NetworkError {
-  constructor(msg) {
-    this.msg = msg;
-  }
-  toString() {
-    return this.msg; 
-  }
 }
 

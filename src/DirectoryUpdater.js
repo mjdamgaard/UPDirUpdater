@@ -2,7 +2,6 @@
 import {ServerQueryHandler} from './ServerQueryHandler.js';
 
 import fs from 'fs';
-import path from 'path';
 import fetch from 'node-fetch';
 
 
@@ -31,7 +30,7 @@ export class DirectoryUpdater {
 
   readDirID(dirPath) {
     // Read the dirID.
-    let idFilePath = path.normalize(dirPath + "/.id.js");
+    let idFilePath = dirPath + "/.id.js";
     let dirID;
     try {
       let contents = fs.readFileSync(idFilePath, 'utf8');
@@ -56,11 +55,11 @@ export class DirectoryUpdater {
 
     // If no dirID was provided, request the server to create a new directory
     // and get the new dirID.
-    let idFilePath = path.normalize(dirPath + "/.id.js");
+    let idFilePath = dirPath + "/.id.js";
     if (!dirID) {
       dirID = this.readDirID(dirPath) ?? "";
       if (!dirID) {
-        dirID = await serverQueryHandler.post(`/1/mkdir/a=${userID}`);
+        dirID = await serverQueryHandler.post(`/1./mkdir/a/${userID}`);
         if (!dirID) throw "mkdir error";
         fs.writeFileSync(idFilePath, `export default "/1/${dirID}";`);
       }
@@ -69,35 +68,55 @@ export class DirectoryUpdater {
     // Request a list of all the files in the server-side directory, and then
     // go through each one and check that it also exist nested in the client-
     // side directory, and for each one that doesn't, request deletion of that
-    // file server-side.
+    // file server-side. We do this be first constructing an array of functions
+    // that generates a promise, and then we generate and wait for each promise
+    // in sequence.  
     let filePaths = await serverQueryHandler.fetchAsAdmin(
-      `/1/${dirID}/_all`
+      `/1/${dirID}./_all`
     );
-    let deletionPromises = [];
+    let deletionPromiseGenerators = [];
+    let serverFilePaths = [];
     filePaths.forEach((relPath) => {
-      let clientFilePath = path.normalize(dirPath + "/" + relPath);
-      let serverFilePath = path.normalize(`/1/${dirID}/${relPath}`);
+      let clientFilePath = dirPath + "/" + relPath;
+      let serverFilePath = normalizePath(`/1/${dirID}/${relPath}`);
       if (!fs.existsSync(clientFilePath)) {
-        deletionPromises.push(
-          serverQueryHandler.postAsAdmin(serverFilePath + "/_rm")
+        deletionPromiseGenerators.push(
+          () => serverQueryHandler.postAsAdmin(serverFilePath + "./_rm")
         );
+        serverFilePaths.push(serverFilePath);
       }
     });
-    await Promise.all(deletionPromises);
+    let len = deletionPromiseGenerators.length;
+    for (let i = 0; i < len; i++) {
+       await deletionPromiseGenerators[i]();
+       console.log("Removed " + serverFilePaths[i]);
+    }
 
     // Then call a helper method to recursively loop through all files in the
     // directory itself or any of its nested directories and uploads them,
-    // pushing a promise for the response of each one to uploadPromises.
-    let uploadPromises = [];
-    this.#uploadDirHelper(dirPath, dirID, uploadPromises, serverQueryHandler);
-    await Promise.all(uploadPromises);
+    // pushing a promise for the response of each one to a
+    // uploadPromiseGenerators array, which is then used to generate and wait
+    // for each upload promise in sequence.
+    let uploadPromiseGenerators = [];
+    serverFilePaths = [];
+    this.#uploadDirHelper(
+      dirPath, dirID, uploadPromiseGenerators, serverFilePaths,
+      serverQueryHandler
+    );
+    len = uploadPromiseGenerators.length;
+    for (let i = 0; i < len; i++) {
+      await uploadPromiseGenerators[i]();
+      let [serverFilePath, isTableFile] = serverFilePaths[i];
+      console.log((isTableFile ? "Touched " : "Uploaded ") + serverFilePath);
+    }
 
     return dirID;
   }
 
 
   async #uploadDirHelper(
-    dirPath, relPath, uploadPromises, serverQueryHandler
+    dirPath, relPath, uploadPromiseGenerators, serverFilePaths,
+    serverQueryHandler
   ) {
     // Get each file in the directory at path, and loop through and handle each
     // one according to its extension (or lack thereof).
@@ -115,24 +134,27 @@ export class DirectoryUpdater {
       // helper method recursively.
       if (/^\.*[^.]+$/.test(name)) {
         this.#uploadDirHelper(
-          childAbsPath, childRelPath, uploadPromises, serverQueryHandler
+          childAbsPath, childRelPath, uploadPromiseGenerators, serverFilePaths,
+          serverQueryHandler
         );
       }
 
       // Else if the file is a text file, upload it as is to the server.
       else if (/\.(jsx?|txt|json|html|xml|svg|css|md)$/.test(name)) {
         let contentText = fs.readFileSync(childAbsPath, 'utf8');
-        uploadPromises.push(
-          serverQueryHandler.postAsAdmin(
-            `/1/${childRelPath}/_put`,
+        uploadPromiseGenerators.push(
+          () => serverQueryHandler.postAsAdmin(
+            `/1/${childRelPath}./_put`,
             contentText,
           )
         );
+        serverFilePaths.push([`/1/${childRelPath}`, false]);
       }
       else if (/\.(att|bt|ct|bbt|ftt)$/.test(name)) {
-        uploadPromises.push(
-          serverQueryHandler.postAsAdmin(`/1/${childRelPath}/_touch`)
+        uploadPromiseGenerators.push(
+          () => serverQueryHandler.postAsAdmin(`/1/${childRelPath}./_touch`)
         );
+        serverFilePaths.push([`/1/${childRelPath}`, true]);
       }
     });
   }
@@ -159,7 +181,7 @@ export class DirectoryUpdater {
     // table files (nothing happens to matched text files), and if so add them
     // to an array of serverFilePaths for data deletion.
     let filePaths = await serverQueryHandler.fetchAsAdmin(
-      `/1/${dirID}/_all`
+      `/1/${dirID}./_all`
     );
     let serverFilePaths = [];
     let hasWildCard = relativePath.at(-1) === "*";
@@ -171,7 +193,7 @@ export class DirectoryUpdater {
           relPath.substring(0, relativePathLen) === relativePath :
           relPath === relativePath;
         if (isMatch) {
-          serverFilePaths.push(path.normalize(`/1/${dirID}/${relPath}`));
+          serverFilePaths.push(normalizePath(`/1/${dirID}/${relPath}`));
         }
       }
     });
@@ -183,10 +205,15 @@ export class DirectoryUpdater {
       prompt: 'Do you want to delete all data held in these tables? [y/n] '
     });
     if (/^[yY]$/.test(confResponse)) {
-      await Promise.all(serverFilePaths.map(serverFilePath => (
-        serverQueryHandler.postAsAdmin(serverFilePath + "/_put")
-      )));
-      console.log("Filed successfully deleted.");
+      let deletionPromiseGenerators = serverFilePaths.map(serverFilePath => (
+        () => serverQueryHandler.postAsAdmin(serverFilePath + "./_put")
+      ));
+      let len = deletionPromiseGenerators.length;
+      for (let i = 0; i < len; i++) {
+        await deletionPromiseGenerators[i]();
+        console.log("Deleted data from " + serverFilePaths[i]);
+      }
+      console.log("Data successfully deleted.");
     }
     else {
       console.log("Aborted.");
@@ -211,7 +238,10 @@ export class DirectoryUpdater {
     // Construct the full route, then query the server. If the route still
     // starts with "/1/<dirID>/", post as admin, and else just post regularly,
     // without requesting admin privileges.
-    let route = path.normalize("/1/" + dirID + "/" + relativeRoute);
+    let route = normalizePath("/1/" + dirID + (relativeRoute[0] === "+" ?
+      relativeRoute.substring(1) :
+      "/" + relativeRoute
+    ));
     if (route.substring(0, dirID.length + 3) === "/1/" + dirID) {
       return await serverQueryHandler.postAsAdmin(
         route, postData, {returnLog: returnLog}
@@ -234,7 +264,10 @@ export class DirectoryUpdater {
     );
 
     // Construct the full route, then query the server.
-    let route = path.normalize("/1/" + dirID + "/" + relativeRoute);
+    let route = normalizePath("/1/" + dirID + (relativeRoute[0] === "+" ?
+      relativeRoute.substring(1) :
+      "/" + relativeRoute
+    ));
     return await serverQueryHandler.fetchAsAdmin(
       route, {returnLog: returnLog}
     );
@@ -250,4 +283,25 @@ export class DirectoryUpdater {
 
   }
 
+}
+
+
+
+
+const SEGMENT_TO_REPLACE_REGEX = /(\/\.\/|\/[^/]+\/\.\.\/)/g;
+
+export function normalizePath(path) {
+  // Then replace any occurrences of "/./", and "<dirName>/../" with "/".
+  let ret = path, prevPath;
+  do {
+    prevPath = ret
+    ret = ret.replaceAll(SEGMENT_TO_REPLACE_REGEX, "/");
+  }
+  while (ret !== prevPath);
+
+  if (ret.includes("/../")) throw (
+    `Ill-formed path: "${path}"`
+  );
+
+  return ret.replace(/\/$/, "");
 }
